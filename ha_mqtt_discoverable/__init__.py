@@ -16,12 +16,11 @@ import json
 import logging
 import ssl
 from importlib import metadata
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar, Union
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import MQTTMessageInfo
-from pydantic import BaseModel, root_validator
-from pydantic.generics import GenericModel
+from pydantic import BaseModel, ConfigDict, model_validator
 
 # Read version from the package metadata
 __version__ = metadata.version(__package__)
@@ -490,7 +489,7 @@ class DeviceInfo(BaseModel):
         Assistant. Examples of such devices are hubs, or parent devices of a sub-device.
         This is used to show device topology in Home Assistant."""
 
-    @root_validator
+    @model_validator(mode="before")
     def must_have_identifiers_or_connection(cls, values):
         """Check that either `identifiers` or `connections` is set"""
         identifiers, connections = values.get("identifiers"), values.get("connections")
@@ -530,7 +529,7 @@ class EntityInfo(BaseModel):
     """Set this to enable editing sensor from the HA ui and to integrate with a
         device"""
 
-    @root_validator
+    @model_validator(mode="before")
     def device_need_unique_id(cls, values):
         """Check that `unique_id` is set if `device` is provided,\
             otherwise Home Assistant will not link the sensor to the device"""
@@ -543,11 +542,14 @@ class EntityInfo(BaseModel):
 EntityType = TypeVar("EntityType", bound=EntityInfo)
 
 
-class Settings(GenericModel, Generic[EntityType]):
+class Settings(BaseModel, Generic[EntityType]):
     class MQTT(BaseModel):
         """Connection settings for the MQTT broker"""
 
-        host: str
+        # To use mqtt.Client
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        host: Optional[str] = "homeassistant"
         port: Optional[int] = 1883
         username: Optional[str] = None
         password: Optional[str] = None
@@ -561,6 +563,9 @@ class Settings(GenericModel, Generic[EntityType]):
         """The root of the topic tree where HA is listening for messages"""
         state_prefix: str = "hmd"
         """The root of the topic tree ha-mqtt-discovery publishes its state messages"""
+
+        client: Optional[mqtt.Client] = None
+        """Optional MQTT client to use for the connection. If provided, most other settings are ignored."""
 
     mqtt: MQTT
     """Connection to MQTT broker"""
@@ -589,9 +594,7 @@ class Discoverable(Generic[EntityType]):
     availability_topic: str
     attributes_topic: str
 
-    def __init__(
-        self, settings: Settings[EntityType], on_connect: Optional[Callable] = None
-    ) -> None:
+    def __init__(self, settings: Settings[EntityType], on_connect: Optional[Callable] = None) -> None:
         """
         Creates a basic discoverable object.
 
@@ -614,46 +617,36 @@ class Discoverable(Generic[EntityType]):
         # e.g. `binary_sensor`
         self._entity_topic = f"{self._entity.component}"
         # If present, append the device name, e.g. `binary_sensor/mydevice`
-        self._entity_topic += (
-            f"/{clean_string(self._entity.device.name)}" if self._entity.device else ""
-        )
+        self._entity_topic += f"/{clean_string(self._entity.device.name)}" if self._entity.device else ""
         # Append the sensor name, e.g. `binary_sensor/mydevice/mysensor`
         self._entity_topic += f"/{clean_string(self._entity.name)}"
 
         # Full topic where we publish the configuration message to be picked up by HA
         # Prepend the `discovery_prefix`, default: `homeassistant`
         # e.g. homeassistant/binary_sensor/mydevice/mysensor
-        self.config_topic = (
-            f"{self._settings.mqtt.discovery_prefix}/{self._entity_topic}/config"
-        )
+        self.config_topic = f"{self._settings.mqtt.discovery_prefix}/{self._entity_topic}/config"
         # Full topic where we publish our own state messages
         # Prepend the `state_prefix`, default: `hmd`
         # e.g. hmd/binary_sensor/mydevice/mysensor
-        self.state_topic = (
-            f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/state"
-        )
+        self.state_topic = f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/state"
 
         # Full topic where we publish our own attributes as JSON messages
         # Prepend the `state_prefix`, default: `hmd`
         # e.g. hmd/binary_sensor/mydevice/mysensor
-        self.attributes_topic = (
-            f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/attributes"
-        )
+        self.attributes_topic = f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/attributes"
 
         logger.info(f"config_topic: {self.config_topic}")
         logger.info(f"state_topic: {self.state_topic}")
         if self._settings.manual_availability:
             # Define the availability topic, using `hmd` topic prefix
-            self.availability_topic = (
-                f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/availability"
-            )
+            self.availability_topic = f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/availability"
             logger.debug(f"availability_topic: {self.availability_topic}")
 
         # Create the MQTT client, registering the user `on_connect` callback
         self._setup_client(on_connect)
         # If there is a callback function defined, the user must manually connect
         # to the MQTT client
-        if not on_connect:
+        if not (on_connect or self._settings.mqtt.client is not None):
             self._connect_client()
 
     def __str__(self) -> str:
@@ -671,16 +664,17 @@ wrote_configuration: {self.wrote_configuration}
 
     def _setup_client(self, on_connect: Optional[Callable] = None) -> None:
         """Create an MQTT client and setup some basic properties on it"""
+
+        # If the user has passed in an MQTT client, use it
+        if self._settings.mqtt.client:
+            self.mqtt_client = self._settings.mqtt.client
+            return
+
         mqtt_settings = self._settings.mqtt
-        logger.debug(
-            f"Creating mqtt client ({mqtt_settings.client_name}) for "
-            f"{mqtt_settings.host}:{mqtt_settings.port}"
-        )
-        self.mqtt_client = mqtt.Client(mqtt_settings.client_name)
+        logger.debug(f"Creating mqtt client ({mqtt_settings.client_name}) for {mqtt_settings.host}:{mqtt_settings.port}")
+        self.mqtt_client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id=mqtt_settings.client_name)
         if mqtt_settings.tls_key:
-            logger.info(
-                f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} with SSL and client certificate authentication"
-            )
+            logger.info(f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} with SSL and client certificate authentication")
             logger.debug(f"ca_certs={mqtt_settings.tls_ca_cert}")
             logger.debug(f"certfile={mqtt_settings.tls_certfile}")
             logger.debug(f"keyfile={mqtt_settings.tls_key}")
@@ -692,9 +686,7 @@ wrote_configuration: {self.wrote_configuration}
                 tls_version=ssl.PROTOCOL_TLS,
             )
         elif mqtt_settings.use_tls:
-            logger.info(
-                f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} with SSL and username/password authentication"
-            )
+            logger.info(f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} with SSL and username/password authentication")
             logger.debug(f"ca_certs={mqtt_settings.tls_ca_cert}")
             if mqtt_settings.tls_ca_cert:
                 self.mqtt_client.tls_set(
@@ -708,17 +700,11 @@ wrote_configuration: {self.wrote_configuration}
                     tls_version=ssl.PROTOCOL_TLS,
                 )
             if mqtt_settings.username:
-                self.mqtt_client.username_pw_set(
-                    mqtt_settings.username, password=mqtt_settings.password
-                )
+                self.mqtt_client.username_pw_set(mqtt_settings.username, password=mqtt_settings.password)
         else:
-            logger.debug(
-                f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} without SSL"
-            )
+            logger.debug(f"Connecting to {mqtt_settings.host}:{mqtt_settings.port} without SSL")
             if mqtt_settings.username:
-                self.mqtt_client.username_pw_set(
-                    mqtt_settings.username, password=mqtt_settings.password
-                )
+                self.mqtt_client.username_pw_set(mqtt_settings.username, password=mqtt_settings.password)
         if on_connect:
             logger.debug("Registering custom callback function")
             self.mqtt_client.on_connect = on_connect
@@ -729,9 +715,7 @@ wrote_configuration: {self.wrote_configuration}
     def _connect_client(self) -> None:
         """Connect the client to the MQTT broker, start its onw internal loop in
         a separate thread"""
-        result = self.mqtt_client.connect(
-            self._settings.mqtt.host, self._settings.mqtt.port
-        )
+        result = self.mqtt_client.connect(self._settings.mqtt.host, self._settings.mqtt.port or 1883)
         # Check if we have established a connection
         if result != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError("Error while connecting to MQTT broker")
@@ -741,8 +725,8 @@ wrote_configuration: {self.wrote_configuration}
         self.mqtt_client.loop_start()
 
     def _state_helper(
-        self, state: Optional[str], topic: Optional[str] = None, retain=True
-    ) -> MQTTMessageInfo:
+        self, state: Optional[Union[str, float, int]], topic: Optional[str] = None, last_reset: Optional[str] = None, retain=True
+    ) -> Optional[MQTTMessageInfo]:
         """
         Write a state to the given MQTT topic, returning the result of client.publish()
         """
@@ -752,6 +736,9 @@ wrote_configuration: {self.wrote_configuration}
         if not topic:
             logger.debug(f"State topic unset, using default: {self.state_topic}")
             topic = self.state_topic
+        if last_reset:
+            state = {"state": state, "last_reset": last_reset}
+            state = json.dumps(state)
         logger.debug(f"Writing '{state}' to {topic}")
 
         if self._settings.debug:
@@ -780,8 +767,7 @@ wrote_configuration: {self.wrote_configuration}
 
         config_message = ""
         logger.info(
-            f"Writing '{config_message}' to topic {self.config_topic} on "
-            "{self._settings.mqtt.host}:{self._settings.mqtt.port}"
+            f"Writing '{config_message}' to topic {self.config_topic} on {self._settings.mqtt.host}:{self._settings.mqtt.port}"
         )
         self.mqtt_client.publish(self.config_topic, config_message, retain=True)
 
@@ -793,7 +779,7 @@ wrote_configuration: {self.wrote_configuration}
         automagically ingest the new sensor.
         """
         # Automatically generate a dict using pydantic
-        config = self._entity.dict(exclude_none=True, by_alias=True)
+        config = self._entity.model_dump(exclude_none=True, by_alias=True)
         # Add the MQTT topics to be discovered by HA
         topics = {
             "state_topic": self.state_topic,
@@ -814,8 +800,7 @@ wrote_configuration: {self.wrote_configuration}
         config_message = json.dumps(self.generate_config())
 
         logger.debug(
-            f"Writing '{config_message}' to topic {self.config_topic} on "
-            f"{self._settings.mqtt.host}:{self._settings.mqtt.port}"
+            f"Writing '{config_message}' to topic {self.config_topic} on {self._settings.mqtt.host}:{self._settings.mqtt.port}"
         )
         self.wrote_configuration = True
         self.config_message = config_message
@@ -893,9 +878,7 @@ class Subscriber(Discoverable[EntityType]):
         # Invoke the parent init
         super().__init__(settings, on_client_connected)
         # Define the command topic to receive commands from HA, using `hmd` topic prefix
-        self._command_topic = (
-            f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/command"
-        )
+        self._command_topic = f"{self._settings.mqtt.state_prefix}/{self._entity_topic}/command"
 
         # Register the user-supplied callback function with its user_data
         self.mqtt_client.user_data_set(user_data)

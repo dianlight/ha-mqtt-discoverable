@@ -28,6 +28,7 @@ from paho.mqtt.client import (
     MQTTv5,
     SubscribeOptions,
 )
+from paho.mqtt.enums import CallbackAPIVersion
 from pytest_mock import MockerFixture
 
 from ha_mqtt_discoverable import DeviceInfo, Discoverable, EntityInfo, Settings
@@ -46,9 +47,7 @@ def discoverable_availability() -> Discoverable[EntityInfo]:
     """Return an instance of Discoverable configured with `manual_availability`"""
     mqtt_settings = Settings.MQTT(host="localhost")
     sensor_info = EntityInfo(name="test", component="binary_sensor")
-    settings = Settings(
-        mqtt=mqtt_settings, entity=sensor_info, manual_availability=True
-    )
+    settings = Settings(mqtt=mqtt_settings, entity=sensor_info, manual_availability=True)
     return Discoverable[EntityInfo](settings)
 
 
@@ -114,9 +113,7 @@ def test_mqtt_topics():
 def test_mqtt_topics_with_device():
     mqtt_settings = Settings.MQTT(host="localhost")
     device = DeviceInfo(name="test_device", identifiers="id")
-    sensor_info = EntityInfo(
-        name="test", component="binary_sensor", device=device, unique_id="unique_id"
-    )
+    sensor_info = EntityInfo(name="test", component="binary_sensor", device=device, unique_id="unique_id")
     settings = Settings(mqtt=mqtt_settings, entity=sensor_info)
     d = Discoverable[EntityInfo](settings)
     assert d._entity_topic == "binary_sensor/test_device/test"
@@ -194,9 +191,7 @@ def test_device_without_identifiers():
 
 def test_device_with_unique_id():
     device_info = DeviceInfo(name="Test device", identifiers="test_device_id")
-    EntityInfo(
-        name="test", component="binary_sensor", unique_id="id", device=device_info
-    )
+    EntityInfo(name="test", component="binary_sensor", unique_id="id", device=device_info)
 
 
 def test_name_with_space():
@@ -209,9 +204,7 @@ def test_name_with_space():
 
 def test_custom_object_id():
     mqtt_settings = Settings.MQTT(host="localhost")
-    sensor_info = EntityInfo(
-        name="Test name", component="binary_sensor", object_id="custom object id"
-    )
+    sensor_info = EntityInfo(name="Test name", component="binary_sensor", object_id="custom object id")
     settings = Settings(mqtt=mqtt_settings, entity=sensor_info)
     d = Discoverable[EntityInfo](settings)
     d.write_config()
@@ -239,7 +232,7 @@ def message_callback(client: Client, userdata, message: MQTTMessage, tmp=None):
 
 def test_publish_multithread(discoverable: Discoverable):
     received_message = Event()
-    mqtt_client = Client(protocol=MQTTv5, userdata=received_message)
+    mqtt_client = Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=MQTTv5, userdata=received_message)
 
     mqtt_client.connect(host="localhost")
     mqtt_client.on_message = message_callback
@@ -266,7 +259,7 @@ def test_publish_multithread(discoverable: Discoverable):
 
 def test_publish_async(discoverable: Discoverable):
     received_message = Event()
-    mqtt_client = Client(protocol=MQTTv5, userdata=received_message)
+    mqtt_client = Client(callback_api_version=CallbackAPIVersion.VERSION2, protocol=MQTTv5, userdata=received_message)
 
     mqtt_client.connect(host="localhost", clean_start=True)
     mqtt_client.on_message = message_callback
@@ -306,10 +299,7 @@ def test_disconnect_client(mocker: MockerFixture):
 
 def test_set_availability_topic(discoverable_availability: Discoverable):
     assert discoverable_availability.availability_topic is not None
-    assert (
-        discoverable_availability.availability_topic
-        == "hmd/binary_sensor/test/availability"
-    )
+    assert discoverable_availability.availability_topic == "hmd/binary_sensor/test/availability"
 
 
 def test_config_availability_topic(discoverable_availability: Discoverable):
@@ -322,9 +312,7 @@ def test_set_availability(discoverable_availability: Discoverable):
     discoverable_availability.set_availability(True)
 
     # Receive a single message, ignoring retained messages
-    availability_message = subscribe.simple(
-        discoverable_availability.availability_topic, msg_count=1, retained=False
-    )
+    availability_message = subscribe.simple(discoverable_availability.availability_topic, msg_count=1, retained=False)
     assert isinstance(availability_message, MQTTMessage)
     assert availability_message.payload.decode("utf-8") == "online"
 

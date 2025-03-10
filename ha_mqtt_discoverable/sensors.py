@@ -56,6 +56,17 @@ class SensorInfo(EntityInfo):
     If not None, the sensor is assumed to be numerical
     and will be displayed as a line-chart
     in the frontend instead of as discrete values."""
+    value_template: Optional[str] = None
+    """
+    Defines a template to extract the value.
+    If the template throws an error,
+    the current state will be used instead."""
+    last_reset_value_template: Optional[str] = None
+    """
+    Defines a template to extract the last_reset.
+    When last_reset_value_template is set, the state_class option must be total.
+    Available variables: entity_id.
+    The entity_id can be used to reference the entity’s attributes."""
 
 
 class SwitchInfo(EntityInfo):
@@ -84,9 +95,7 @@ class LightInfo(EntityInfo):
 
     component: str = "light"
 
-    state_schema: str = Field(
-        default="json", alias="schema"
-    )  # 'schema' is a reserved word by pydantic
+    state_schema: str = Field(default="json", alias="schema")  # 'schema' is a reserved word by pydantic
     """Sets the schema of the state topic, ie the 'schema' field in the configuration"""
     optimistic: Optional[bool] = None
     """Flag that defines if light works in optimistic mode.
@@ -227,20 +236,79 @@ class DeviceTriggerInfo(EntityInfo):
     """Information about the device this sensor belongs to (required)"""
 
 
+class CameraInfo(EntityInfo):
+    """
+    Information about the 'camera' entity.
+    """
+
+    component: str = "camera"
+    """The component type is 'camera' for this entity."""
+    availability_topic: Optional[str] = None
+    """The MQTT topic subscribed to publish the camera availability."""
+    payload_available: Optional[str] = "online"
+    """Payload to publish to indicate the camera is online."""
+    payload_not_available: Optional[str] = "offline"
+    """Payload to publish to indicate the camera is offline."""
+    topic: Optional[str] = None
+    """
+    The MQTT topic to subscribe to receive an image URL. A url_template option can extract the URL from the message.
+    The content_type will be derived from the image when downloaded.
+    """
+    retain: Optional[bool] = None
+    """If the published message should have the retain flag on or not."""
+
+
+class ImageInfo(EntityInfo):
+    """
+    Information about the 'image' entity.
+    """
+
+    component: str = "image"
+    """The component type is 'image' for this entity."""
+    availability_topic: Optional[str] = None
+    """The MQTT topic subscribed to publish the image availability."""
+    payload_available: Optional[str] = "online"
+    """Payload to publish to indicate the image is online."""
+    payload_not_available: Optional[str] = "offline"
+    """Payload to publish to indicate the image is offline."""
+    url_topic: Optional[str] = None
+    """
+    The MQTT topic to subscribe to receive an image URL. A url_template option can extract the URL from the message.
+    The content_type will be derived from the image when downloaded.
+    """
+    retain: Optional[bool] = None
+    """If the published message should have the retain flag on or not."""
+
+
+class SelectInfo(EntityInfo):
+    """Switch specific information"""
+
+    component: str = "select"
+    optimistic: Optional[bool] = None
+    """Flag that defines if switch works in optimistic mode.
+    Default: true if no state_topic defined, else false."""
+    retain: Optional[bool] = None
+    """If the published message should have the retain flag on or not"""
+    state_topic: Optional[str] = None
+    """The MQTT topic subscribed to receive state updates."""
+    options: Optional[list] = None
+    """List of options that can be selected. An empty list or a list with a single item is allowed."""
+
+
 class BinarySensor(Discoverable[BinarySensorInfo]):
     def off(self):
         """
         Set binary sensor to off
         """
-        self._update_state(state=False)
+        self.update_state(state=False)
 
     def on(self):
         """
         Set binary sensor to on
         """
-        self._update_state(state=True)
+        self.update_state(state=True)
 
-    def _update_state(self, state: bool) -> None:
+    def update_state(self, state: bool) -> None:
         """
         Update MQTT sensor state
 
@@ -251,14 +319,12 @@ class BinarySensor(Discoverable[BinarySensorInfo]):
             state_message = self._entity.payload_on
         else:
             state_message = self._entity.payload_off
-        logger.info(
-            f"Setting {self._entity.name} to {state_message} using {self.state_topic}"
-        )
+        logger.info(f"Setting {self._entity.name} to {state_message} using {self.state_topic}")
         self._state_helper(state=state_message)
 
 
 class Sensor(Discoverable[SensorInfo]):
-    def set_state(self, state: str | int | float) -> None:
+    def set_state(self, state: str | int | float, last_reset: str = None) -> None:
         """
         Update the sensor state
 
@@ -266,7 +332,9 @@ class Sensor(Discoverable[SensorInfo]):
             state(str): What state to set the sensor to
         """
         logger.info(f"Setting {self._entity.name} to {state} using {self.state_topic}")
-        self._state_helper(str(state))
+        if last_reset:
+            logger.info("Setting last_reset to " + last_reset)
+        self._state_helper(str(state), last_reset=last_reset)
 
 
 # Inherit the on and off methods from the BinarySensor class, changing only the
@@ -320,9 +388,7 @@ class Light(Subscriber[LightInfo]):
             brightness(int): Brightness value of [0,255]
         """
         if brightness < 0 or brightness > 255:
-            raise RuntimeError(
-                f"Brightness for light {self._entity.name} is out of range"
-            )
+            raise RuntimeError(f"Brightness for light {self._entity.name} is out of range")
 
         state_payload = {
             "brightness": brightness,
@@ -342,13 +408,9 @@ class Light(Subscriber[LightInfo]):
             color(Dict[str, Any]): Color to set, according to color_mode format
         """
         if not self._entity.color_mode:
-            raise RuntimeError(
-                f"Light {self._entity.name} does not support setting color"
-            )
+            raise RuntimeError(f"Light {self._entity.name} does not support setting color")
         if color_mode not in self._entity.supported_color_modes:
-            raise RuntimeError(
-                f"Color is not in configured supported_color_modes {str(self._entity.supported_color_modes)}"
-            )
+            raise RuntimeError(f"Color is not in configured supported_color_modes {str(self._entity.supported_color_modes)}")
         # We do not check if color schema conforms to color mode formatting, it is up to the caller
         state_payload = {
             "color_mode": color_mode,
@@ -367,9 +429,7 @@ class Light(Subscriber[LightInfo]):
         if not self._entity.effect:
             raise RuntimeError(f"Light {self._entity.name} does not support effects")
         if effect not in self._entity.effect_list:
-            raise RuntimeError(
-                f"Effect is not within configured effect_list {str(self._entity.effect_list)}"
-            )
+            raise RuntimeError(f"Effect is not within configured effect_list {str(self._entity.effect_list)}")
         state_payload = {
             "effect": effect,
             "state": self._entity.payload_on,
@@ -385,9 +445,7 @@ class Light(Subscriber[LightInfo]):
         """
         logger.info(f"Setting {self._entity.name} to {state} using {self.state_topic}")
         json_state = json.dumps(state)
-        self._state_helper(
-            state=json_state, topic=self.state_topic, retain=self._entity.retain
-        )
+        self._state_helper(state=json_state, topic=self.state_topic, retain=self._entity.retain)
 
 
 class Cover(Subscriber[CoverInfo]):
@@ -424,9 +482,7 @@ class Cover(Subscriber[CoverInfo]):
         """
         print("State: " + state)
         logger.info(f"Setting {self._entity.name} to {state} using {self.state_topic}")
-        self._state_helper(
-            state=state, topic=self.state_topic, retain=self._entity.retain
-        )
+        self._state_helper(state=state, topic=self.state_topic, retain=self._entity.retain)
 
 
 class Button(Subscriber[ButtonInfo]):
@@ -476,9 +532,7 @@ class Text(Subscriber[TextInfo]):
         """
         if not self._entity.min <= len(text) <= self._entity.max:
             bound = f"[{self._entity.min}, {self._entity.max}]"
-            raise RuntimeError(
-                f"Text is not within configured length boundaries {bound}"
-            )
+            raise RuntimeError(f"Text is not within configured length boundaries {bound}")
 
         logger.info(f"Setting {self._entity.name} to {text} using {self.state_topic}")
         self._state_helper(str(text))
@@ -502,3 +556,74 @@ class Number(Subscriber[NumberInfo]):
 
         logger.info(f"Setting {self._entity.name} to {value} using {self.state_topic}")
         self._state_helper(value)
+
+
+class Camera(Subscriber[CameraInfo]):
+    """
+    Implements an MQTT camera for Home Assistant MQTT discovery:
+    https://www.home-assistant.io/integrations/image.mqtt/
+    """
+
+    def set_topic(self, image_topic: str) -> None:
+        """
+        Update the camera state (image URL).
+
+        Args:
+            image_topic (str): Topic of the image to be set as the camera state.
+        """
+        if not image_topic:
+            raise RuntimeError("Image topic cannot be empty")
+
+        logger.info(f"Publishing camera image topic {image_topic} to {self._entity.topic}")
+        self._state_helper(image_topic)
+
+    def set_availability(self, available: bool) -> None:
+        """
+        Update the camera availability status.
+
+        Args:
+            available (bool): Whether the camera is available or not.
+        """
+        payload = self._entity.payload_available if available else self._entity.payload_not_available
+        logger.info(f"Setting camera availability to {payload} using {self._entity.availability_topic}")
+        self.mqtt_client.publish(self._entity.availability_topic, payload, retain=self._entity.retain)
+
+
+class Image(Discoverable[ImageInfo]):
+    """
+    Implements an MQTT image for Home Assistant MQTT discovery:
+    https://www.home-assistant.io/integrations/image.mqtt/
+    """
+
+    def set_url(self, image_url: str) -> None:
+        """
+        Update the camera state (image URL).
+
+        Args:
+            image_url (str): URL of the image to be set as the camera state.
+        """
+        if not image_url:
+            raise RuntimeError("Image URL cannot be empty")
+
+        logger.info(f"Publishing image URL {image_url} to {self._entity.url_topic}")
+        self._state_helper(image_url, self._entity.url_topic)
+
+
+class Select(Subscriber[SelectInfo]):
+    """
+    Implements an MQTT camera for Home Assistant MQTT discovery:
+    https://www.home-assistant.io/integrations/image.mqtt/
+    """
+
+    def set_options(self, opt: list) -> None:
+        """
+        Update the selectable options.
+
+        Args:
+            opt (list): List of options that can be selected.
+        """
+        if not opt:
+            raise RuntimeError("Image URL cannot be empty")
+
+        logger.info(f"Publishing options {opt} to {self._entity.options}")
+        self._state_helper(opt)

@@ -1,9 +1,10 @@
+---
 # This workflow will build a Python wheel, a Docker image containing the CLI tool and publish both to PyPi and DockerHub
 
 name: Build and publish
 
 # Run only when pushing a Git version tag
-on:
+on: # yamllint disable-line rule:truthy
   push:
     tags:
       - "v*"
@@ -70,7 +71,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
